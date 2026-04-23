@@ -1,0 +1,32 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	bootstrap(bootstrap)
+	recall_reflections(recall_reflections)
+	actor(actor)
+	execute_action(execute_action)
+	record_step(record_step)
+	judge(judge)
+	reflect(reflect)
+	finalize(finalize)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> bootstrap;
+	actor -.-> execute_action;
+	actor -.-> judge;
+	actor -.-> record_step;
+	bootstrap --> recall_reflections;
+	execute_action --> record_step;
+	judge -.-> finalize;
+	judge -.-> reflect;
+	recall_reflections --> actor;
+	record_step -.-> actor;
+	record_step -.-> judge;
+	reflect --> recall_reflections;
+	finalize --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc

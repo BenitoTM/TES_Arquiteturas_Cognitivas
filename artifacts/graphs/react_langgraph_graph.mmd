@@ -1,0 +1,27 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	bootstrap(bootstrap)
+	recall_memories(recall_memories)
+	planner(planner)
+	execute_action(execute_action)
+	record_step(record_step)
+	finalize(finalize)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> bootstrap;
+	bootstrap --> recall_memories;
+	execute_action --> record_step;
+	planner -.-> execute_action;
+	planner -.-> finalize;
+	planner -.-> record_step;
+	recall_memories --> planner;
+	record_step -.-> finalize;
+	record_step -.-> recall_memories;
+	finalize --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc
