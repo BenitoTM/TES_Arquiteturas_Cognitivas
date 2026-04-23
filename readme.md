@@ -37,7 +37,7 @@ Repositório de experimentos com arquiteturas cognitivas para agentes baseados e
 │   ├── roteiro_apresentacao.md  # roteiro para a apresentação
 │   └── free_llm_examples.md     # referências auxiliares
 ├── compare_agents.py            # benchmark comparativo automático
-├── compare_agents_suite.py      # suíte com benchmark simples + benchmark filtrado
+├── compare_agents_suite.py      # suíte com benchmark simples + benchmark de diferenca absoluta
 ├── exemple.env                  # exemplo de configuração
 ├── llm_call.py                  # chatbot mínimo
 ├── lats_call.py                 # LATS + CoALA
@@ -288,8 +288,8 @@ Artefatos gerados:
 
 - `artifacts/benchmark/simple_top3/comparison.md`
 - `artifacts/benchmark/simple_top3/comparison.json`
-- `artifacts/benchmark/filtered_top3_subset/comparison.md`
-- `artifacts/benchmark/filtered_top3_subset/comparison.json`
+- `artifacts/benchmark/top3_absolute_difference/comparison.md`
+- `artifacts/benchmark/top3_absolute_difference/comparison.json`
 - `artifacts/benchmark/suite_summary.md`
 - `artifacts/benchmark/suite_summary.json`
 

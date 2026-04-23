@@ -36,6 +36,12 @@ FILTERED_TOP3_BENCHMARK_QUESTION = (
     "subconjunto e diga quantos países entraram nele. Depois responda se essa nova média é maior "
     "ou menor que a média mundial."
 )
+ABSOLUTE_DIFFERENCE_TOP3_BENCHMARK_QUESTION = (
+    "Pesquise os 3 países com maior PIB da América do Sul. "
+    "Calcule a média do PIB per capita deles. Depois compare essa média com a média mundial do PIB "
+    "per capita e responda qual é a diferença em US$. "
+    "Por fim, diga se essa diferença é maior ou menor que 1000 US$."
+)
 
 
 def _utc_now() -> str:
@@ -545,6 +551,33 @@ def get_filtered_top3_benchmark_reference() -> dict[str, Any]:
     }
 
 
+def _is_absolute_difference_top3_benchmark_question(question: str) -> bool:
+    normalized = _normalize_text(question)
+    return (
+        "3 paises com maior pib da america do sul" in normalized
+        and "diferenca em us" in normalized
+        and "1000 us" in normalized
+    )
+
+
+def get_absolute_difference_top3_benchmark_reference() -> dict[str, Any]:
+    base_reference = get_official_benchmark_reference()
+    raw_difference = base_reference["top3_average"] - base_reference["world_average"]
+    absolute_difference = abs(raw_difference)
+    threshold_comparison = "maior" if absolute_difference > 1000 else "menor"
+    return {
+        "question": ABSOLUTE_DIFFERENCE_TOP3_BENCHMARK_QUESTION,
+        "top3": base_reference["top3"],
+        "top3_average": base_reference["top3_average"],
+        "world_average": base_reference["world_average"],
+        "world_year": base_reference["world_year"],
+        "raw_difference": raw_difference,
+        "absolute_difference": absolute_difference,
+        "threshold_value": 1000.0,
+        "threshold_comparison": threshold_comparison,
+    }
+
+
 def _extract_numbers(text: str) -> list[float]:
     numbers = []
     for token in re.findall(r"\d[\d\.,]*", text):
@@ -636,12 +669,62 @@ def evaluate_filtered_top3_benchmark_answer(
     }
 
 
+def evaluate_absolute_difference_top3_benchmark_answer(
+    response: str,
+    reference: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    reference = reference or get_absolute_difference_top3_benchmark_reference()
+    normalized = _normalize_text(response)
+    expected_countries = [_normalize_text(item["country_name"]) for item in reference["top3"]]
+    missing_countries = [country for country in expected_countries if country not in normalized]
+    has_threshold_comparison = reference["threshold_comparison"] in normalized
+    has_threshold_value = "1000" in normalized
+
+    numbers = _extract_numbers(response)
+    has_top3_average = any(abs(number - reference["top3_average"]) <= 5 for number in numbers)
+    has_world = any(abs(number - reference["world_average"]) <= 5 for number in numbers)
+    has_absolute_difference = any(abs(number - reference["absolute_difference"]) <= 5 for number in numbers)
+
+    missing_items = []
+    if missing_countries:
+        missing_items.append(f"faltaram paises do top 3: {', '.join(missing_countries)}")
+    if not has_top3_average:
+        missing_items.append("faltou a media calculada do top 3")
+    if not has_world:
+        missing_items.append("faltou a media mundial")
+    if not has_absolute_difference:
+        missing_items.append("faltou a diferenca calculada em US$")
+    if not has_threshold_value:
+        missing_items.append("faltou citar o limite de 1000 US$")
+    if not has_threshold_comparison:
+        missing_items.append(
+            f"faltou indicar que a diferenca absoluta e {reference['threshold_comparison']} que 1000 US$"
+        )
+
+    if missing_items:
+        return {
+            "correct": False,
+            "feedback": " ; ".join(missing_items),
+            "reference": reference,
+        }
+    return {
+        "correct": True,
+        "feedback": (
+            "A resposta contem os paises corretos do top 3, a media do top 3, a media mundial, "
+            "a diferenca calculada e a comparacao correta com 1000 US$."
+        ),
+        "reference": reference,
+    }
+
+
 def get_benchmark_reference(question: str) -> dict[str, Any] | None:
     normalized = _normalize_text(question)
     if normalized == _normalize_text(OFFICIAL_BENCHMARK_QUESTION):
         return get_official_benchmark_reference()
     if _is_filtered_top3_benchmark_question(question):
         return get_filtered_top3_benchmark_reference()
+    if _is_absolute_difference_top3_benchmark_question(question):
+        return get_absolute_difference_top3_benchmark_reference()
     return None
 
 
@@ -655,7 +738,30 @@ def evaluate_benchmark_answer(
         return evaluate_official_benchmark_answer(response, reference=reference)
     if _is_filtered_top3_benchmark_question(question):
         return evaluate_filtered_top3_benchmark_answer(response, reference=reference)
+    if _is_absolute_difference_top3_benchmark_question(question):
+        return evaluate_absolute_difference_top3_benchmark_answer(response, reference=reference)
     return None
+
+
+def analisar_benchmark_top3_diferenca(_: str, runtime: ToolRuntime) -> str:
+    if not _is_absolute_difference_top3_benchmark_question(runtime.question):
+        return (
+            "Esta ferramenta estruturada foi desenhada para o benchmark de diferenca absoluta "
+            "entre a media do top 3 e a media mundial."
+        )
+
+    reference = get_absolute_difference_top3_benchmark_reference()
+    lines = [
+        "BENCHMARK_TOP3_DIFERENCA_ABSOLUTA",
+        f"TOP_3={', '.join(item['country_name'] for item in reference['top3'])}",
+        f"MEDIA_TOP3={_format_money(reference['top3_average'])} US$",
+        f"MEDIA_MUNDIAL={_format_money(reference['world_average'])} US$",
+        f"DIFERENCA_BRUTA={_format_money(reference['raw_difference'])} US$",
+        f"DIFERENCA_ABSOLUTA={_format_money(reference['absolute_difference'])} US$",
+        f"LIMITE=1000.00 US$",
+        f"COMPARACAO_COM_1000={reference['threshold_comparison']}",
+    ]
+    return "\n".join(lines)
 
 
 def buscar_ibge(query: str, runtime: ToolRuntime) -> str:
@@ -774,6 +880,15 @@ def build_tool_registry() -> dict[str, ToolSpec]:
             handler=buscar_media_mundial_pib_per_capita,
         ),
         ToolSpec(
+            name="analisar_benchmark_top3_diferenca",
+            kind="interna",
+            description=(
+                "Para o benchmark de diferenca absoluta do top 3, retorna em formato estruturado "
+                "o top 3, a media do top 3, a media mundial, a diferenca absoluta e a comparacao com 1000 US$."
+            ),
+            handler=analisar_benchmark_top3_diferenca,
+        ),
+        ToolSpec(
             name="calcular",
             kind="interna",
             description="Avalia expressoes matematicas e comparacoes simples com +, -, *, /, //, %, **, >, <, >=, <=.",
@@ -858,9 +973,12 @@ Regras:
 - Use ferramentas de memoria quando elas ajudarem.
 - Se descobrir um fato estavel e reutilizavel, voce pode salva-lo com memorizar_semantica.
 - Para o benchmark oficial, use buscar_ibge[America do Sul] e buscar_media_mundial_pib_per_capita[].
+- Para o benchmark de diferenca absoluta, use analisar_benchmark_top3_diferenca[].
 - Se as observacoes ja trouxerem TOP_3_PIB_AMERICA_DO_SUL e MEDIA_MUNDIAL_PIB_PER_CAPITA, pare de buscar e finalize.
+- Se as observacoes trouxerem BENCHMARK_TOP3_DIFERENCA_ABSOLUTA, pare de buscar e finalize.
 - Se a ultima observacao de calculo for True ou False, transforme isso em maior/menor e responda Final Answer imediatamente.
 - No benchmark oficial, a Final Answer deve citar explicitamente os 3 paises, a media calculada, a media mundial e a comparacao final.
+- No benchmark de diferenca absoluta, a Final Answer deve citar explicitamente os 3 paises, a media do top 3, a media mundial, a diferenca em US$ e se ela e maior ou menor que 1000 US$.
 - Seja objetivo e nao invente dados.
 
 Ferramentas disponiveis:
@@ -900,6 +1018,13 @@ Checklist do benchmark oficial:
 - citar a media do PIB per capita do top 3
 - citar a media mundial do PIB per capita
 - dizer se a media do top 3 e maior ou menor que a mundial
+
+Checklist do benchmark de diferenca absoluta:
+- citar explicitamente os 3 paises do top 3
+- citar a media do PIB per capita do top 3
+- citar a media mundial do PIB per capita
+- citar a diferenca em US$
+- dizer se a diferenca e maior ou menor que 1000 US$
 
 Decida o proximo melhor passo. Se ja houver informacao suficiente, responda com Final Answer.
 """

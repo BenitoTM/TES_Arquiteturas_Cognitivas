@@ -13,9 +13,9 @@ Pergunta usada: Pesquise os 3 países com maior PIB da América do Sul, calcule 
 
 | Arquitetura | Resposta correta? | Chamadas ao LLM | Tempo total (s) | Input tokens | Output tokens | Tokens | Custo estimado (USD) | Steps | Memoria CoALA | Complexidade de codigo | Quando usar? |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|
-| ReAct + CoALA | Sim | 5 | 18.8484 | 6294 | 433 | 6727 | 0.0029707 | 5 | working + semantic + episodic + procedural | media | quando a tarefa depende de ferramentas externas e ciclo Thought -> Action -> Observation |
-| Reflection / Reflexion | Sim | 6 | 14.4895 | 7907 | 496 | 8403 | 0.0036121 | 6 | working + semantic + episodic + procedural + reflection memory | alta | quando vale pagar mais chamadas ao LLM para revisar e corrigir tentativas |
-| LATS + CoALA | Sim | 8 | 35.8405 | 9492 | 554 | 10046 | 0.0042326 | 4 | working + semantic + episodic + procedural + arvore de busca | alta | quando compensa explorar multiplos ramos e selecionar a trajetoria mais promissora |
+| ReAct + CoALA | Sim | 5 | 14.2772 | 7600 | 435 | 8035 | 0.0033675 | 5 | working + semantic + episodic + procedural | media | quando a tarefa depende de ferramentas externas e ciclo Thought -> Action -> Observation |
+| Reflection / Reflexion | Sim | 5 | 12.8387 | 7072 | 414 | 7486 | 0.0031566 | 5 | working + semantic + episodic + procedural + reflection memory | alta | quando vale pagar mais chamadas ao LLM para revisar e corrigir tentativas |
+| LATS + CoALA | Sim | 9 | 34.7414 | 11708 | 863 | 12571 | 0.0056699 | 3 | working + semantic + episodic + procedural + arvore de busca | alta | quando compensa explorar multiplos ramos e selecionar a trajetoria mais promissora |
 
 ## Custo estimado
 

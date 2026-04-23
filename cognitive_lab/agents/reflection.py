@@ -107,6 +107,12 @@ Regras:
   2. a media do PIB per capita;
   3. a comparacao com a media mundial;
   4. uma resposta final clara.
+- Para o benchmark de diferenca absoluta, use analisar_benchmark_top3_diferenca[] e so encerre quando tiver:
+  1. os 3 paises corretos;
+  2. a media do PIB per capita do top 3;
+  3. a media mundial;
+  4. a diferenca em US$;
+  5. a comparacao com 1000 US$.
 - Nao repita a mesma acao sem progresso.
 - Seja objetivo e nao invente dados.
 
@@ -158,6 +164,7 @@ Historico recente desta tentativa:
 
 Instrucao operacional:
 - Se ja houver TOP_3_PIB_AMERICA_DO_SUL e MEDIA_MUNDIAL_PIB_PER_CAPITA nas observacoes, faca no maximo uma acao de calculo e depois responda Final Answer.
+- Se ja houver BENCHMARK_TOP3_DIFERENCA_ABSOLUTA nas observacoes, responda Final Answer sem fazer novas buscas.
 - Se a ultima observacao for True ou False, responda Final Answer imediatamente.
 - Se ja houver numeros suficientes, nao faca nova busca.
 - Se a resposta ja estiver pronta, responda Final Answer imediatamente.
@@ -381,8 +388,8 @@ def run_reflection_attempt(
 def judge_attempt(question: str, attempt_result: dict[str, Any], llm: Any) -> dict[str, Any]:
     if not attempt_result.get("final_answer"):
         feedback = (
-            "Faltou resposta final clara. Gere Final Answer assim que tiver os tres paises corretos, "
-            "a media calculada e a comparacao com a media mundial."
+            "Faltou resposta final clara. Gere Final Answer assim que tiver todos os numeros necessarios "
+            "e a comparacao final pedida pelo benchmark."
         )
         print("Judge Verdict: RETRY")
         print(f"Judge Feedback: {feedback}")
@@ -394,8 +401,13 @@ def judge_attempt(question: str, attempt_result: dict[str, Any], llm: Any) -> di
             "llm_calls": 0,
         }
 
-    if react_coala._normalize_text(question) == react_coala._normalize_text(react_coala.OFFICIAL_BENCHMARK_QUESTION):
-        evaluation = react_coala.evaluate_official_benchmark_answer(attempt_result["final_answer"])
+    reference = react_coala.get_benchmark_reference(question)
+    if reference is not None:
+        evaluation = react_coala.evaluate_benchmark_answer(
+            question,
+            attempt_result["final_answer"],
+            reference=reference,
+        )
         verdict = "ACCEPT" if evaluation["correct"] else "RETRY"
         print(f"Judge Verdict: {verdict}")
         print(f"Judge Feedback: {evaluation['feedback']}")

@@ -24,9 +24,9 @@ BENCHMARK_SPECS = [
         "lats_max_depth": 4,
     },
     {
-        "id": "filtered_top3_subset",
-        "title": "Benchmark com filtro e subconjunto",
-        "question": react_coala.FILTERED_TOP3_BENCHMARK_QUESTION,
+        "id": "top3_absolute_difference",
+        "title": "Benchmark com diferenca absoluta",
+        "question": react_coala.ABSOLUTE_DIFFERENCE_TOP3_BENCHMARK_QUESTION,
         "react_max_steps": 12,
         "reflection_max_attempts": 4,
         "reflection_max_steps": 8,

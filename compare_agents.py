@@ -101,6 +101,19 @@ def _reference_section(question: str, reference: dict[str, Any] | None) -> list[
             "",
         ]
 
+    if react_coala._normalize_text(question) == react_coala._normalize_text(react_coala.ABSOLUTE_DIFFERENCE_TOP3_BENCHMARK_QUESTION) and reference is not None:
+        return [
+            "## Referencia deterministica",
+            "",
+            f"- Top 3 por PIB: {', '.join(item['country_name'] for item in reference['top3'])}",
+            f"- Media do PIB per capita do top 3: {reference['top3_average']:.2f} US$",
+            f"- Media mundial do PIB per capita ({reference['world_year']}): {reference['world_average']:.2f} US$",
+            f"- Diferenca bruta: {reference['raw_difference']:.2f} US$",
+            f"- Diferenca absoluta: {reference['absolute_difference']:.2f} US$",
+            f"- Comparacao com 1000 US$: {reference['threshold_comparison']}",
+            "",
+        ]
+
     return [
         "## Tipo de avaliacao",
         "",
