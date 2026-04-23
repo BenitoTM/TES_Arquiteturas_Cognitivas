@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
@@ -32,6 +33,7 @@ class ReactLangGraphState(TypedDict, total=False):
     observation: str | None
     final_answer: str | None
     total_tokens: int
+    llm_calls: int
     memory_counts: dict[str, int]
 
 
@@ -49,6 +51,7 @@ def build_react_langgraph(config: PortkeyLangGraphConfig):
             "step": 0,
             "trajectory": [],
             "total_tokens": 0,
+            "llm_calls": 0,
             "working_memory": {
                 "goal": state["question"],
                 "step": 0,
@@ -89,6 +92,7 @@ def build_react_langgraph(config: PortkeyLangGraphConfig):
         )
 
         tokens = state.get("total_tokens", 0)
+        llm_calls = state.get("llm_calls", 0) + 1
         if getattr(response, "usage_metadata", None):
             tokens += response.usage_metadata.get("total_tokens", 0)
 
@@ -106,6 +110,7 @@ def build_react_langgraph(config: PortkeyLangGraphConfig):
             "step": current_step,
             "planner_text": text,
             "total_tokens": tokens,
+            "llm_calls": llm_calls,
             "working_memory": updated_working_memory,
             "action_name": None,
             "action_input": None,
@@ -185,6 +190,7 @@ def build_react_langgraph(config: PortkeyLangGraphConfig):
         if not final_answer:
             final_answer = "Limite de passos atingido antes de chegar a uma resposta final."
 
+        # Persistencia CoALA: a resposta final vira episodio e tambem memoria semantica consolidada.
         memory.add_episode(
             state["question"],
             final_answer,
@@ -210,6 +216,7 @@ def build_react_langgraph(config: PortkeyLangGraphConfig):
             return "finalize"
         return "recall_memories"
 
+    # O grafo reproduz o loop Thought -> Action -> Observation com memoria explicita.
     graph_builder.add_node("bootstrap", bootstrap)
     graph_builder.add_node("recall_memories", recall_memories)
     graph_builder.add_node("planner", planner)
@@ -220,6 +227,7 @@ def build_react_langgraph(config: PortkeyLangGraphConfig):
     graph_builder.add_edge(START, "bootstrap")
     graph_builder.add_edge("bootstrap", "recall_memories")
     graph_builder.add_edge("recall_memories", "planner")
+    # Roteamento principal: depois de planejar, o agente age, registra a observacao ou encerra.
     graph_builder.add_conditional_edges(
         "planner",
         planner_route,
@@ -251,6 +259,7 @@ def invoke_react_langgraph_once(
     graph: Any | None = None,
 ) -> dict[str, Any]:
     graph = graph or build_react_langgraph(config)
+    started_at = time.perf_counter()
     result = graph.invoke(
         {
             "question": question,
@@ -268,6 +277,8 @@ def invoke_react_langgraph_once(
         "resposta": result["final_answer"],
         "steps": result["step"],
         "tokens": result["total_tokens"],
+        "llm_calls": result.get("llm_calls", 0),
+        "total_time_seconds": round(time.perf_counter() - started_at, 4),
         "trajectory": result.get("trajectory", []),
         "memory_dir": str(Path(memory_dir).resolve()),
         "memory_counts": result.get("memory_counts", {}),
@@ -280,7 +291,7 @@ def main() -> None:
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
-    question = os.getenv("REACT_USER_MESSAGE", config.user_message)
+    question = os.getenv("REACT_USER_MESSAGE", config.user_message or react_coala.OFFICIAL_BENCHMARK_QUESTION)
     max_steps = int(os.getenv("REACT_MAX_STEPS", "10"))
     memory_dir = Path(os.getenv("COALA_MEMORY_DIR", react_coala.DEFAULT_MEMORY_DIR))
     graph_mermaid = Path(os.getenv("REACT_LANGGRAPH_MERMAID", DEFAULT_GRAPH_MERMAID))

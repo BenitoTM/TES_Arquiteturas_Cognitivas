@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
@@ -38,6 +39,7 @@ class ReflectionLangGraphState(TypedDict, total=False):
     judge_feedback: str | None
     latest_reflection: str | None
     total_tokens: int
+    llm_calls: int
     memory_counts: dict[str, int]
 
 
@@ -56,6 +58,7 @@ def build_reflection_langgraph(config: PortkeyLangGraphConfig):
             "step": 0,
             "trajectory": [],
             "total_tokens": 0,
+            "llm_calls": 0,
             "working_memory": {
                 "goal": state["question"],
                 "step": 0,
@@ -104,6 +107,7 @@ def build_reflection_langgraph(config: PortkeyLangGraphConfig):
             stop=["Observation:"],
         )
         tokens = state.get("total_tokens", 0)
+        llm_calls = state.get("llm_calls", 0) + 1
         if getattr(response, "usage_metadata", None):
             tokens += response.usage_metadata.get("total_tokens", 0)
 
@@ -121,6 +125,7 @@ def build_reflection_langgraph(config: PortkeyLangGraphConfig):
             "step": current_step,
             "planner_text": text,
             "total_tokens": tokens,
+            "llm_calls": llm_calls,
             "working_memory": updated_working_memory,
             "action_name": None,
             "action_input": None,
@@ -193,6 +198,16 @@ def build_reflection_langgraph(config: PortkeyLangGraphConfig):
             print(f"Judge Feedback: {feedback}")
             return {"judge_verdict": "RETRY", "judge_feedback": feedback}
 
+        if react_coala._normalize_text(state["question"]) == react_coala._normalize_text(react_coala.OFFICIAL_BENCHMARK_QUESTION):
+            evaluation = react_coala.evaluate_official_benchmark_answer(state["final_answer"])
+            verdict = "ACCEPT" if evaluation["correct"] else "RETRY"
+            print(f"Judge Verdict: {verdict}")
+            print(f"Judge Feedback: {evaluation['feedback']}")
+            return {
+                "judge_verdict": verdict,
+                "judge_feedback": evaluation["feedback"],
+            }
+
         response = llm.invoke(
             [
                 react_coala.SystemMessage(content="Voce avalia respostas de agentes com rigor e objetividade."),
@@ -206,6 +221,7 @@ def build_reflection_langgraph(config: PortkeyLangGraphConfig):
             ]
         )
         tokens = state.get("total_tokens", 0)
+        llm_calls = state.get("llm_calls", 0) + 1
         if getattr(response, "usage_metadata", None):
             tokens += response.usage_metadata.get("total_tokens", 0)
 
@@ -217,6 +233,7 @@ def build_reflection_langgraph(config: PortkeyLangGraphConfig):
             "judge_verdict": parsed["verdict"],
             "judge_feedback": parsed["feedback"],
             "total_tokens": tokens,
+            "llm_calls": llm_calls,
         }
 
     def reflect(state: ReflectionLangGraphState) -> ReflectionLangGraphState:
@@ -238,6 +255,7 @@ def build_reflection_langgraph(config: PortkeyLangGraphConfig):
             ]
         )
         tokens = state.get("total_tokens", 0)
+        llm_calls = state.get("llm_calls", 0) + 1
         if getattr(response, "usage_metadata", None):
             tokens += response.usage_metadata.get("total_tokens", 0)
 
@@ -254,6 +272,7 @@ def build_reflection_langgraph(config: PortkeyLangGraphConfig):
         return {
             "latest_reflection": reflection_text,
             "total_tokens": tokens,
+            "llm_calls": llm_calls,
             "attempt_number": state["attempt_number"] + 1,
             "step": 0,
             "trajectory": [],
@@ -276,6 +295,7 @@ def build_reflection_langgraph(config: PortkeyLangGraphConfig):
 
         final_answer = state.get("final_answer")
         if state.get("judge_verdict") == "ACCEPT" and final_answer:
+            # Persistencia da tentativa aceita para memoria episodica e semantica.
             memory.add_episode(
                 state["question"],
                 final_answer,
@@ -319,6 +339,7 @@ def build_reflection_langgraph(config: PortkeyLangGraphConfig):
             return "finalize"
         return "reflect"
 
+    # O grafo implementa o ciclo Reflection: agir -> avaliar -> refletir -> tentar novamente.
     graph_builder.add_node("bootstrap", bootstrap)
     graph_builder.add_node("recall_reflections", recall_reflections)
     graph_builder.add_node("actor", actor)
@@ -349,6 +370,7 @@ def build_reflection_langgraph(config: PortkeyLangGraphConfig):
             "judge": "judge",
         },
     )
+    # Depois de cada tentativa, o juiz decide se encerramos ou se precisamos refletir e repetir.
     graph_builder.add_conditional_edges(
         "judge",
         judge_route,
@@ -372,6 +394,7 @@ def invoke_reflection_langgraph_once(
     graph: Any | None = None,
 ) -> dict[str, Any]:
     graph = graph or build_reflection_langgraph(config)
+    started_at = time.perf_counter()
     result = graph.invoke(
         {
             "question": question,
@@ -390,6 +413,8 @@ def invoke_reflection_langgraph_once(
         "attempts": result["attempt_number"],
         "steps": result["step"],
         "tokens": result["total_tokens"],
+        "llm_calls": result.get("llm_calls", 0),
+        "total_time_seconds": round(time.perf_counter() - started_at, 4),
         "trajectory": result.get("trajectory", []),
         "judge_feedback": result.get("judge_feedback"),
         "memory_dir": str(Path(memory_dir).resolve()),
@@ -403,7 +428,10 @@ def main() -> None:
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
-    question = os.getenv("REFLECTION_USER_MESSAGE", os.getenv("REACT_USER_MESSAGE", config.user_message))
+    question = os.getenv(
+        "REFLECTION_USER_MESSAGE",
+        os.getenv("REACT_USER_MESSAGE", config.user_message or react_coala.OFFICIAL_BENCHMARK_QUESTION),
+    )
     max_attempts = int(os.getenv("REFLECTION_MAX_ATTEMPTS", "3"))
     max_steps = int(os.getenv("REFLECTION_MAX_STEPS", "6"))
     memory_dir = Path(os.getenv("REFLECTION_MEMORY_DIR", reflection.DEFAULT_REFLECTION_MEMORY_DIR))

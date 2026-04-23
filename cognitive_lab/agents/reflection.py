@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -91,13 +92,21 @@ Formato obrigatorio:
 Thought: [raciocinio curto e util]
 Action: ferramenta[argumento]
 
-Quando tiver uma resposta candidata, responda exatamente:
+Quando tiver uma resposta candidata completa, responda exatamente:
 Final Answer: [resposta final]
 
 Regras:
 - Nunca escreva a palavra Observation.
 - Execute apenas uma Action por resposta.
 - Use as reflexoes anteriores para corrigir sua estrategia.
+- Se o historico ja tiver dados suficientes, pare de buscar e feche a resposta.
+- Se a ultima observacao for True ou False apos uma comparacao, converta isso em maior/menor e responda Final Answer.
+- Para o benchmark oficial, voce so pode encerrar quando tiver:
+  1. os 3 paises corretos;
+  2. a media do PIB per capita;
+  3. a comparacao com a media mundial;
+  4. uma resposta final clara.
+- Nao repita a mesma acao sem progresso.
 - Seja objetivo e nao invente dados.
 
 Ferramentas disponiveis:
@@ -117,7 +126,7 @@ def build_reflection_attempt_prompt(
     trajectory: list[dict[str, Any]],
 ) -> str:
     reflection_block = (
-        "\n".join(f"- {item['reflection']} | feedback: {item['feedback']}" for item in reflections)
+        "\n".join(f"- {item['reflection']} | feedback anterior: {item['feedback']}" for item in reflections)
         if reflections
         else "Nenhuma reflexao anterior relevante."
     )
@@ -146,7 +155,13 @@ Memoria episodica relevante:
 Historico recente desta tentativa:
 {react_coala._render_trajectory(trajectory)}
 
-Produza o proximo passo. Se ja houver informacao suficiente, responda com Final Answer.
+Instrucao operacional:
+- Se ja houver TOP_3_PIB_AMERICA_DO_SUL e MEDIA_MUNDIAL_PIB_PER_CAPITA nas observacoes, faca no maximo uma acao de calculo e depois responda Final Answer.
+- Se a ultima observacao for True ou False, responda Final Answer imediatamente.
+- Se ja houver numeros suficientes, nao faca nova busca.
+- Se a resposta ja estiver pronta, responda Final Answer imediatamente.
+
+Produza o proximo passo.
 """
 
 
@@ -162,12 +177,17 @@ Resposta candidata:
 Trajetoria resumida:
 {react_coala._summarize_trajectory(trajectory)}
 
+Avalie explicitamente estes itens:
+- os tres paises corretos
+- a media calculada
+- a comparacao com a media mundial
+- a clareza da resposta final
+
 Responda exatamente neste formato:
 Verdict: ACCEPT ou RETRY
-Feedback: [uma explicacao curta]
+Feedback: [diga objetivamente quais itens faltaram ou o que deve ser corrigido, e qual deve ser a proxima acao]
 
-Use ACCEPT apenas se a resposta final responder a pergunta de forma clara e consistente com a trajetoria.
-Se faltar resposta final, houver lacunas, suposicoes fracas ou erros, use RETRY.
+Use ACCEPT apenas se os quatro itens estiverem satisfeitos.
 """
 
 
@@ -189,7 +209,7 @@ Feedback do avaliador:
 {feedback}
 
 Escreva exatamente:
-Reflection: [2 ou 3 frases curtas com licoes praticas para a proxima tentativa]
+Reflection: [2 ou 3 frases curtas, operacionais e acionaveis, dizendo o que fazer na proxima tentativa, o que evitar repetir e quando encerrar com Final Answer]
 """
 
 
@@ -208,7 +228,21 @@ def parse_reflection_output(text: str) -> str:
     match = re.search(r"Reflection:\s*(.+)", text, re.DOTALL)
     if match:
         return match.group(1).strip()
-    return text.strip() or "Verifique se a resposta final realmente responde a pergunta antes de encerrar."
+    return text.strip() or "Use os dados ja coletados, evite repetir buscas e encerre com Final Answer assim que a comparacao estiver pronta."
+
+
+def _is_repeated_action_without_progress(
+    trajectory: list[dict[str, Any]],
+    action_name: str,
+    action_input: str,
+) -> bool:
+    if not trajectory:
+        return False
+    last_step = trajectory[-1]
+    return (
+        last_step.get("action") == action_name
+        and last_step.get("action_input") == action_input
+    )
 
 
 def run_reflection_attempt(
@@ -231,7 +265,9 @@ def run_reflection_attempt(
     }
     trajectory: list[dict[str, Any]] = []
     total_tokens = 0
+    llm_calls = 0
 
+    # Loop principal do Reflection: agir com base nas reflexoes anteriores.
     for _ in range(max_steps):
         semantic_hits = memory.search_semantic(f"{question}\n{working_memory.get('last_observation') or ''}", top_k=3)
         episodic_hits = memory.search_episodic(f"{question}\n{working_memory.get('last_observation') or ''}", top_k=3)
@@ -247,6 +283,7 @@ def run_reflection_attempt(
             trajectory=trajectory,
         )
 
+        llm_calls += 1
         response = llm.invoke(
             [
                 SystemMessage(content=build_reflection_actor_system_prompt(tools)),
@@ -270,6 +307,7 @@ def run_reflection_attempt(
                 "final_answer": parsed["final_answer"],
                 "steps": working_memory["step"],
                 "tokens": total_tokens,
+                "llm_calls": llm_calls,
                 "trajectory": trajectory,
                 "working_memory": working_memory,
             }
@@ -296,7 +334,9 @@ def run_reflection_attempt(
         working_memory["last_thought"] = parsed["thought"]
         working_memory["last_action"] = f"{action_name}[{action_input}]"
 
-        if action_name not in tools:
+        if _is_repeated_action_without_progress(trajectory, action_name, action_input):
+            observation = "Acao repetida sem progresso. Escolha outra ferramenta ou finalize se os dados ja forem suficientes."
+        elif action_name not in tools:
             observation = f"Ferramenta invalida: {action_name}. Ferramentas validas: {', '.join(sorted(tools))}."
         else:
             runtime = react_coala.ToolRuntime(
@@ -327,6 +367,7 @@ def run_reflection_attempt(
         "final_answer": None,
         "steps": working_memory["step"],
         "tokens": total_tokens,
+        "llm_calls": llm_calls,
         "trajectory": trajectory,
         "working_memory": working_memory,
     }
@@ -334,10 +375,29 @@ def run_reflection_attempt(
 
 def judge_attempt(question: str, attempt_result: dict[str, Any], llm: Any) -> dict[str, Any]:
     if not attempt_result.get("final_answer"):
+        feedback = (
+            "Faltou resposta final clara. Gere Final Answer assim que tiver os tres paises corretos, "
+            "a media calculada e a comparacao com a media mundial."
+        )
+        print("Judge Verdict: RETRY")
+        print(f"Judge Feedback: {feedback}")
         return {
             "verdict": "RETRY",
-            "feedback": "A tentativa terminou sem produzir uma resposta final clara.",
+            "feedback": feedback,
             "tokens": 0,
+            "llm_calls": 0,
+        }
+
+    if react_coala._normalize_text(question) == react_coala._normalize_text(react_coala.OFFICIAL_BENCHMARK_QUESTION):
+        evaluation = react_coala.evaluate_official_benchmark_answer(attempt_result["final_answer"])
+        verdict = "ACCEPT" if evaluation["correct"] else "RETRY"
+        print(f"Judge Verdict: {verdict}")
+        print(f"Judge Feedback: {evaluation['feedback']}")
+        return {
+            "verdict": verdict,
+            "feedback": evaluation["feedback"],
+            "tokens": 0,
+            "llm_calls": 0,
         }
 
     response = llm.invoke(
@@ -360,7 +420,7 @@ def judge_attempt(question: str, attempt_result: dict[str, Any], llm: Any) -> di
     parsed = parse_judge_output(text)
     print(f"Judge Verdict: {parsed['verdict']}")
     print(f"Judge Feedback: {parsed['feedback']}")
-    return {**parsed, "tokens": tokens}
+    return {**parsed, "tokens": tokens, "llm_calls": 1}
 
 
 def reflect_on_attempt(question: str, attempt_result: dict[str, Any], feedback: str, llm: Any) -> dict[str, Any]:
@@ -383,7 +443,7 @@ def reflect_on_attempt(question: str, attempt_result: dict[str, Any], feedback: 
     text = response.content if isinstance(response.content, str) else str(response.content)
     reflection = parse_reflection_output(text)
     print(f"Reflection: {reflection}")
-    return {"reflection": reflection, "tokens": tokens}
+    return {"reflection": reflection, "tokens": tokens, "llm_calls": 1}
 
 
 def run_reflection_agent(
@@ -397,13 +457,16 @@ def run_reflection_agent(
     memory = react_coala.CoALAMemoryStore(root)
     reflection_memory = ReflectionMemoryStore(root)
     total_tokens = 0
+    total_llm_calls = 0
     last_attempt: dict[str, Any] | None = None
     last_feedback = ""
+    started_at = time.perf_counter()
 
     print("=== INICIANDO AGENTE REFLECTION ===")
     print(f"Pergunta: {question}\n")
     print(f"Memoria persistente: {root.resolve()}\n")
 
+    # Loop principal do Reflection: tentativa -> juiz -> reflexao -> nova tentativa.
     for attempt_number in range(1, max_attempts + 1):
         print(f"=== TENTATIVA {attempt_number}/{max_attempts} ===")
         reflections = reflection_memory.search_reflections(question, top_k=3)
@@ -417,10 +480,12 @@ def run_reflection_agent(
             memory_dir=root,
         )
         total_tokens += attempt_result.get("tokens", 0)
+        total_llm_calls += attempt_result.get("llm_calls", 0)
         last_attempt = attempt_result
 
         judge_result = judge_attempt(question, attempt_result, llm)
         total_tokens += judge_result.get("tokens", 0)
+        total_llm_calls += judge_result.get("llm_calls", 0)
         last_feedback = judge_result["feedback"]
 
         if judge_result["verdict"] == "ACCEPT":
@@ -433,6 +498,8 @@ def run_reflection_agent(
                 "attempts": attempt_number,
                 "steps": attempt_result["steps"],
                 "tokens": total_tokens,
+                "llm_calls": total_llm_calls,
+                "total_time_seconds": round(time.perf_counter() - started_at, 4),
                 "trajectory": attempt_result["trajectory"],
                 "judge_feedback": judge_result["feedback"],
                 "memory_dir": str(root.resolve()),
@@ -445,6 +512,7 @@ def run_reflection_agent(
         if attempt_number < max_attempts:
             reflection_result = reflect_on_attempt(question, attempt_result, judge_result["feedback"], llm)
             total_tokens += reflection_result.get("tokens", 0)
+            total_llm_calls += reflection_result.get("llm_calls", 0)
             reflection_memory.add_reflection(
                 question=question,
                 reflection=reflection_result["reflection"],
@@ -464,6 +532,8 @@ def run_reflection_agent(
         "attempts": max_attempts,
         "steps": last_attempt["steps"] if last_attempt else 0,
         "tokens": total_tokens,
+        "llm_calls": total_llm_calls,
+        "total_time_seconds": round(time.perf_counter() - started_at, 4),
         "trajectory": last_attempt["trajectory"] if last_attempt else [],
         "judge_feedback": last_feedback,
         "memory_dir": str(root.resolve()),

@@ -29,7 +29,10 @@ Repositório de experimentos com arquiteturas cognitivas para agentes baseados e
 │   ├── coala_memory/            # memória persistente do ReACT
 │   └── reflection_memory/       # memória persistente do Reflection
 ├── docs/
+│   ├── analise_comparativa.md   # texto curto de comparação para o trabalho
+│   ├── roteiro_apresentacao.md  # roteiro para a apresentação
 │   └── free_llm_examples.md     # referências auxiliares
+├── compare_agents.py            # benchmark comparativo automático
 ├── exemple.env                  # exemplo de configuração
 ├── llm_call.py                  # chatbot mínimo
 ├── react_call.py                # ReACT + CoALA
@@ -91,6 +94,12 @@ MODEL_TEMPERATURE=0
 ```
 
 ## Como rodar
+
+### Pergunta oficial usada no benchmark
+
+```text
+Pesquise os 3 países com maior PIB da América do Sul, calcule a média do PIB per capita deles e responda: essa média é maior ou menor que a média mundial?
+```
 
 ### 1. Chatbot mínimo
 
@@ -193,6 +202,22 @@ Saídas:
 - Mermaid em `artifacts/graphs/reflection_langgraph_graph.mmd`
 - PNG opcional com `REFLECTION_LANGGRAPH_PNG=artifacts/graphs/reflection_langgraph_graph.png`
 
+### 6. Benchmark comparativo
+
+```bash
+.venv/bin/python compare_agents.py
+```
+
+Esse script:
+
+- roda `ReAct + CoALA` e `Reflection / Reflexion` com a mesma pergunta oficial
+- mede `resposta correta?`, `llm_calls`, `total_time_seconds`, `tokens` e `steps`
+- salva artefatos em:
+  - `artifacts/benchmark/comparison.md`
+  - `artifacts/benchmark/comparison.json`
+
+Esse é o comando principal para reproduzir a comparação final do trabalho.
+
 ## Como salvar os grafos em PNG
 
 Exemplos:
@@ -223,4 +248,7 @@ Principais pacotes do projeto:
 
 - `cognitive_lab/langgraph_portkey.py`, `cognitive_lab/react_coala.py` e `cognitive_lab/reflection_agent.py` continuam existindo como wrappers de compatibilidade.
 - `data/` e `artifacts/graphs/` estão no `.gitignore`, porque são saídas geradas em execução.
+- `artifacts/benchmark/` também é gerado durante os benchmarks comparativos.
 - `docs/free_llm_examples.md` foi mantido como material de referência complementar.
+- A análise comparativa final está em [`docs/analise_comparativa.md`](/Users/benito/PycharmProjects/TES_arquiteturas_cognitivas/docs/analise_comparativa.md:1).
+- O roteiro de apresentação está em [`docs/roteiro_apresentacao.md`](/Users/benito/PycharmProjects/TES_arquiteturas_cognitivas/docs/roteiro_apresentacao.md:1).

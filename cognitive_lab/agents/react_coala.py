@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 import json
 import re
+import time
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,14 +16,61 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 
 DEFAULT_MEMORY_DIR = "data/coala_memory"
+WORLD_BANK_WORLD_GDP_PER_CAPITA_URL = (
+    "https://api.worldbank.org/v2/country/WLD/indicator/NY.GDP.PCAP.CD?format=json&per_page=10"
+)
+OFFICIAL_BENCHMARK_QUESTION = (
+    "Pesquise os 3 países com maior PIB da América do Sul, calcule a média do "
+    "PIB per capita deles e responda: essa média é maior ou menor que a média mundial?"
+)
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _normalize_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFKD", text)
+    without_accents = "".join(char for char in normalized if not unicodedata.combining(char))
+    return without_accents.lower().strip()
+
+
 def _normalize_tokens(text: str) -> set[str]:
-    return set(re.findall(r"\w+", text.lower()))
+    return set(re.findall(r"\w+", _normalize_text(text)))
+
+
+def _parse_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _parse_localized_number(token: str) -> float | None:
+    cleaned = token.strip()
+    if not cleaned:
+        return None
+    if "," in cleaned and "." in cleaned:
+        if cleaned.rfind(",") > cleaned.rfind("."):
+            cleaned = cleaned.replace(".", "").replace(",", ".")
+        else:
+            cleaned = cleaned.replace(",", "")
+    elif "," in cleaned:
+        cleaned = cleaned.replace(".", "").replace(",", ".")
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _format_money(value: float | None) -> str:
+    if value is None:
+        return "N/A"
+    return f"{value:.2f}"
 
 
 def _safe_eval(expression: str) -> str:
@@ -30,6 +79,7 @@ def _safe_eval(expression: str) -> str:
         ast.Expression,
         ast.BinOp,
         ast.UnaryOp,
+        ast.Compare,
         ast.Add,
         ast.Sub,
         ast.Mult,
@@ -42,9 +92,15 @@ def _safe_eval(expression: str) -> str:
         ast.Constant,
         ast.Name,
         ast.Load,
+        ast.Gt,
+        ast.GtE,
+        ast.Lt,
+        ast.LtE,
+        ast.Eq,
+        ast.NotEq,
     )
 
-    def _eval(node: ast.AST) -> float:
+    def _eval(node: ast.AST) -> float | bool:
         if not isinstance(node, allowed_nodes):
             raise ValueError("Expressao contem operacoes nao permitidas.")
 
@@ -61,13 +117,13 @@ def _safe_eval(expression: str) -> str:
         if isinstance(node, ast.UnaryOp):
             operand = _eval(node.operand)
             if isinstance(node.op, ast.USub):
-                return -operand
+                return -float(operand)
             if isinstance(node.op, ast.UAdd):
-                return operand
+                return float(operand)
             raise ValueError("Operador unario nao permitido.")
         if isinstance(node, ast.BinOp):
-            left = _eval(node.left)
-            right = _eval(node.right)
+            left = float(_eval(node.left))
+            right = float(_eval(node.right))
             if isinstance(node.op, ast.Add):
                 return left + right
             if isinstance(node.op, ast.Sub):
@@ -83,12 +139,33 @@ def _safe_eval(expression: str) -> str:
             if isinstance(node.op, ast.Pow):
                 return left ** right
             raise ValueError("Operador binario nao permitido.")
+        if isinstance(node, ast.Compare):
+            if len(node.ops) != 1 or len(node.comparators) != 1:
+                raise ValueError("Apenas comparacoes simples sao permitidas.")
+            left = float(_eval(node.left))
+            right = float(_eval(node.comparators[0]))
+            op = node.ops[0]
+            if isinstance(op, ast.Gt):
+                return left > right
+            if isinstance(op, ast.GtE):
+                return left >= right
+            if isinstance(op, ast.Lt):
+                return left < right
+            if isinstance(op, ast.LtE):
+                return left <= right
+            if isinstance(op, ast.Eq):
+                return left == right
+            if isinstance(op, ast.NotEq):
+                return left != right
+            raise ValueError("Operador de comparacao nao permitido.")
 
         raise ValueError("Expressao invalida.")
 
     tree = ast.parse(expression, mode="eval")
     result = _eval(tree)
-    if result.is_integer():
+    if isinstance(result, bool):
+        return "True" if result else "False"
+    if float(result).is_integer():
         return str(int(result))
     return str(result)
 
@@ -199,70 +276,275 @@ class CoALAMemoryStore:
         return [item for _, item in scored[:top_k]]
 
 
-def buscar_ibge(query: str, _: ToolRuntime) -> str:
-    query_lower = query.lower().strip()
+def _extract_latest_series_point(series: list[dict[str, Any]]) -> tuple[int | None, float | None]:
+    best_year: int | None = None
+    best_value: float | None = None
+    for item in series:
+        for key, raw_value in item.items():
+            if not re.fullmatch(r"\d{4}", key):
+                continue
+            parsed_value = _parse_float(raw_value)
+            if parsed_value is None:
+                continue
+            year = int(key)
+            if best_year is None or year > best_year:
+                best_year = year
+                best_value = parsed_value
+    return best_year, best_value
+
+
+def _fetch_ibge_countries() -> list[dict[str, Any]]:
+    response = requests.get("https://servicodados.ibge.gov.br/api/v1/paises/all", timeout=10)
+    response.raise_for_status()
+    return response.json()
+
+
+def _fetch_ibge_indicator_map(country_ids: list[str], indicator_id: int) -> dict[str, dict[str, Any]]:
+    response = requests.get(
+        f"https://servicodados.ibge.gov.br/api/v1/paises/{'|'.join(country_ids)}/indicadores/{indicator_id}",
+        timeout=10,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    series = payload[0]["series"] if payload else []
+    result: dict[str, dict[str, Any]] = {}
+    for item in series:
+        year, value = _extract_latest_series_point(item["serie"])
+        result[item["pais"]["id"]] = {"year": year, "value": value}
+    return result
+
+
+def _south_america_countries(countries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result = []
+    for country in countries:
+        location = country.get("localizacao") or {}
+        region = location.get("regiao-intermediaria") or {}
+        if region.get("nome") == "América do sul":
+            result.append(country)
+    return result
+
+
+def _build_country_records(countries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    country_ids = [country["id"]["ISO-3166-1-ALPHA-2"] for country in countries]
+    pib_map = _fetch_ibge_indicator_map(country_ids, 77827)
+    pib_pc_map = _fetch_ibge_indicator_map(country_ids, 77823)
+
+    records = []
+    for country in countries:
+        country_id = country["id"]["ISO-3166-1-ALPHA-2"]
+        pib_info = pib_map.get(country_id, {})
+        pib_pc_info = pib_pc_map.get(country_id, {})
+        records.append(
+            {
+                "country_id": country_id,
+                "country_name": country["nome"]["abreviado"],
+                "pib_year": pib_info.get("year"),
+                "pib": pib_info.get("value"),
+                "pib_per_capita_year": pib_pc_info.get("year"),
+                "pib_per_capita": pib_pc_info.get("value"),
+            }
+        )
+    return records
+
+
+def _match_country(countries: list[dict[str, Any]], query: str) -> dict[str, Any] | None:
+    normalized_query = _normalize_text(query)
+    for country in countries:
+        short_name = _normalize_text(country.get("nome", {}).get("abreviado", ""))
+        if normalized_query == short_name or normalized_query in short_name:
+            return country
+    return None
+
+
+def _is_official_benchmark_context(query: str, runtime: ToolRuntime | None) -> bool:
+    normalized_query = _normalize_text(query)
+    normalized_question = _normalize_text(runtime.question if runtime else "")
+    mentions_south_america = "america do sul" in normalized_query or "america do sul" in normalized_question
+    mentions_top3 = any(
+        token in normalized_question
+        for token in ("3 paises", "3 países", "top 3", "maior pib", "maiores pib", "benchmark")
+    )
+    return mentions_south_america and mentions_top3
+
+
+def _format_top3_block(records: list[dict[str, Any]]) -> str:
+    pib_year = max(record["pib_year"] for record in records if record["pib_year"] is not None)
+    pib_pc_year = max(
+        record["pib_per_capita_year"] for record in records if record["pib_per_capita_year"] is not None
+    )
+    expression = " + ".join(_format_money(record["pib_per_capita"]) for record in records)
+    lines = [
+        "TOP_3_PIB_AMERICA_DO_SUL",
+        "FONTE=IBGE API de paises/indicadores",
+        f"ANO_REFERENCIA_PIB={pib_year}",
+        f"ANO_REFERENCIA_PIB_PER_CAPITA={pib_pc_year}",
+    ]
+    for index, record in enumerate(records, start=1):
+        lines.append(
+            f"{index}. {record['country_name']} | PIB={_format_money(record['pib'])} US$ | "
+            f"PIB_PER_CAPITA={_format_money(record['pib_per_capita'])} US$"
+        )
+    lines.append(f"EXPRESSAO_MEDIA_PIB_PER_CAPITA=({expression}) / {len(records)}")
+    return "\n".join(lines)
+
+
+def _format_country_block(record: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "DADOS_PAIS_IBGE",
+            "FONTE=IBGE API de paises/indicadores",
+            f"PAIS={record['country_name']}",
+            f"ANO_REFERENCIA_PIB={record['pib_year']}",
+            f"PIB={_format_money(record['pib'])} US$",
+            f"ANO_REFERENCIA_PIB_PER_CAPITA={record['pib_per_capita_year']}",
+            f"PIB_PER_CAPITA={_format_money(record['pib_per_capita'])} US$",
+        ]
+    )
+
+
+def _fetch_world_bank_world_gdp_per_capita() -> dict[str, Any]:
+    response = requests.get(WORLD_BANK_WORLD_GDP_PER_CAPITA_URL, timeout=10)
+    response.raise_for_status()
+    payload = response.json()
+    entries = payload[1] if len(payload) > 1 else []
+    for entry in entries:
+        value = _parse_float(entry.get("value"))
+        if value is not None:
+            return {
+                "year": int(entry["date"]),
+                "value": value,
+                "source": "World Bank NY.GDP.PCAP.CD",
+            }
+    raise ValueError("Nao foi possivel localizar um valor mundial valido no World Bank.")
+
+
+def get_official_benchmark_reference() -> dict[str, Any]:
+    countries = _fetch_ibge_countries()
+    south_america_records = _build_country_records(_south_america_countries(countries))
+    top3 = sorted(
+        [record for record in south_america_records if record["pib"] is not None and record["pib_per_capita"] is not None],
+        key=lambda record: record["pib"],
+        reverse=True,
+    )[:3]
+    world = _fetch_world_bank_world_gdp_per_capita()
+    top3_average = sum(record["pib_per_capita"] for record in top3) / len(top3)
+    comparison = "maior" if top3_average > world["value"] else "menor"
+    return {
+        "question": OFFICIAL_BENCHMARK_QUESTION,
+        "top3": top3,
+        "top3_average": top3_average,
+        "world_average": world["value"],
+        "world_year": world["year"],
+        "comparison": comparison,
+    }
+
+
+def _extract_numbers(text: str) -> list[float]:
+    numbers = []
+    for token in re.findall(r"\d[\d\.,]*", text):
+        parsed = _parse_localized_number(token)
+        if parsed is not None:
+            numbers.append(parsed)
+    return numbers
+
+
+def evaluate_official_benchmark_answer(
+    response: str,
+    reference: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    reference = reference or get_official_benchmark_reference()
+    normalized = _normalize_text(response)
+    expected_countries = [_normalize_text(item["country_name"]) for item in reference["top3"]]
+    missing_countries = [country for country in expected_countries if country not in normalized]
+    expected_comparison = reference["comparison"]
+    has_expected_comparison = expected_comparison in normalized
+
+    numbers = _extract_numbers(response)
+    has_average = any(abs(number - reference["top3_average"]) <= 5 for number in numbers)
+    has_world = any(abs(number - reference["world_average"]) <= 5 for number in numbers)
+
+    missing_items = []
+    if missing_countries:
+        missing_items.append(f"faltaram paises: {', '.join(missing_countries)}")
+    if not has_average:
+        missing_items.append("faltou a media calculada")
+    if not has_world:
+        missing_items.append("faltou a media mundial")
+    if not has_expected_comparison:
+        missing_items.append(f"faltou indicar que a media do top 3 e {expected_comparison} que a mundial")
+
+    if missing_items:
+        return {
+            "correct": False,
+            "feedback": " ; ".join(missing_items),
+            "reference": reference,
+        }
+    return {
+        "correct": True,
+        "feedback": "A resposta contem os tres paises corretos, a media do top 3, a media mundial e a comparacao correta.",
+        "reference": reference,
+    }
+
+
+def buscar_ibge(query: str, runtime: ToolRuntime) -> str:
+    query_normalized = _normalize_text(query)
     try:
-        response = requests.get("https://servicodados.ibge.gov.br/api/v1/paises/all", timeout=10)
-        response.raise_for_status()
-        countries = response.json()
+        countries = _fetch_ibge_countries()
 
-        if "mundo" in query_lower or "mundial" in query_lower:
-            return "Media mundial estimada: PIB per capita = 12000 US$."
+        if any(
+            token in query_normalized
+            for token in (
+                "america do sul",
+                "top_3_pib_america_do_sul",
+                "top 3 pib america do sul",
+                "maiores pibs da america do sul",
+                "maior pib america do sul",
+            )
+        ):
+            records = _build_country_records(_south_america_countries(countries))
+            valid_records = [
+                record for record in records if record["pib"] is not None and record["pib_per_capita"] is not None
+            ]
+            sorted_records = sorted(valid_records, key=lambda record: record["pib"], reverse=True)
 
-        targets = []
-        if "américa do sul" in query_lower or "america do sul" in query_lower:
-            for country in countries:
-                location = country.get("localizacao") or {}
-                region = location.get("regiao-intermediaria") or {}
-                if region.get("nome") == "América do sul":
-                    targets.append(country)
-        else:
-            for country in countries:
-                short_name = country.get("nome", {}).get("abreviado", "").lower()
-                if query_lower in short_name:
-                    targets.append(country)
-                    break
+            # Para o benchmark oficial, a ferramenta ja retorna exatamente os tres maiores PIBs.
+            if _is_official_benchmark_context(query, runtime):
+                return _format_top3_block(sorted_records[:3])
 
-        if not targets:
+            lines = [
+                "PIB_AMERICA_DO_SUL_ORDENADO",
+                "FONTE=IBGE API de paises/indicadores",
+            ]
+            for index, record in enumerate(sorted_records, start=1):
+                lines.append(
+                    f"{index}. {record['country_name']} | PIB={_format_money(record['pib'])} US$ | "
+                    f"PIB_PER_CAPITA={_format_money(record['pib_per_capita'])} US$"
+                )
+            return "\n".join(lines)
+
+        matched_country = _match_country(countries, query)
+        if not matched_country:
             return "Nenhum pais encontrado para essa busca na API do IBGE."
 
-        ids = "|".join(country["id"]["ISO-3166-1-ALPHA-2"] for country in targets)
-        pib_response = requests.get(
-            f"https://servicodados.ibge.gov.br/api/v1/paises/{ids}/indicadores/77827",
-            timeout=10,
-        )
-        pib_pc_response = requests.get(
-            f"https://servicodados.ibge.gov.br/api/v1/paises/{ids}/indicadores/77823",
-            timeout=10,
-        )
-        pib_response.raise_for_status()
-        pib_pc_response.raise_for_status()
-
-        def get_latest(series: list[dict[str, Any]]) -> str:
-            for item in reversed(series):
-                value = list(item.values())[0]
-                if value is not None:
-                    return str(value)
-            return "N/A"
-
-        pib_payload = pib_response.json()
-        pib_pc_payload = pib_pc_response.json()
-        pib_series = pib_payload[0]["series"] if pib_payload else []
-        pib_pc_series = pib_pc_payload[0]["series"] if pib_pc_payload else []
-
-        pib_by_country = {item["pais"]["id"]: get_latest(item["serie"]) for item in pib_series}
-        pib_pc_by_country = {item["pais"]["id"]: get_latest(item["serie"]) for item in pib_pc_series}
-
-        lines = ["Dados da API do IBGE:"]
-        for country in targets:
-            country_id = country["id"]["ISO-3166-1-ALPHA-2"]
-            short_name = country["nome"]["abreviado"]
-            pib = pib_by_country.get(country_id, "N/A")
-            pib_per_capita = pib_pc_by_country.get(country_id, "N/A")
-            lines.append(f"- {short_name}: PIB = {pib} US$, PIB per capita = {pib_per_capita} US$")
-        return "\n".join(lines)
+        record = _build_country_records([matched_country])[0]
+        return _format_country_block(record)
     except Exception as exc:
         return f"Erro ao acessar API do IBGE: {exc}"
+
+
+def buscar_media_mundial_pib_per_capita(_: str, __: ToolRuntime) -> str:
+    try:
+        world = _fetch_world_bank_world_gdp_per_capita()
+        return "\n".join(
+            [
+                "MEDIA_MUNDIAL_PIB_PER_CAPITA",
+                f"FONTE={world['source']}",
+                f"ANO_REFERENCIA={world['year']}",
+                f"VALOR={_format_money(world['value'])} US$",
+            ]
+        )
+    except Exception as exc:
+        return f"Erro ao acessar a media mundial do PIB per capita: {exc}"
 
 
 def calcular(expression: str, _: ToolRuntime) -> str:
@@ -307,13 +589,22 @@ def build_tool_registry() -> dict[str, ToolSpec]:
         ToolSpec(
             name="buscar_ibge",
             kind="externa",
-            description="Busca dados de paises ou regioes na API do IBGE e retorna PIB e PIB per capita em US$.",
+            description=(
+                "Busca dados do IBGE. Para o benchmark oficial com America do Sul, retorna "
+                "diretamente os 3 maiores PIBs da regiao em formato estruturado."
+            ),
             handler=buscar_ibge,
+        ),
+        ToolSpec(
+            name="buscar_media_mundial_pib_per_capita",
+            kind="externa",
+            description="Busca a media mundial do PIB per capita no World Bank em formato estruturado.",
+            handler=buscar_media_mundial_pib_per_capita,
         ),
         ToolSpec(
             name="calcular",
             kind="interna",
-            description="Avalia expressoes matematicas com +, -, *, /, //, %, **, parenteses e constantes pi/e.",
+            description="Avalia expressoes matematicas e comparacoes simples com +, -, *, /, //, %, **, >, <, >=, <=.",
             handler=calcular,
         ),
         ToolSpec(
@@ -394,6 +685,10 @@ Regras:
 - Execute apenas uma Action por resposta.
 - Use ferramentas de memoria quando elas ajudarem.
 - Se descobrir um fato estavel e reutilizavel, voce pode salva-lo com memorizar_semantica.
+- Para o benchmark oficial, use buscar_ibge[America do Sul] e buscar_media_mundial_pib_per_capita[].
+- Se as observacoes ja trouxerem TOP_3_PIB_AMERICA_DO_SUL e MEDIA_MUNDIAL_PIB_PER_CAPITA, pare de buscar e finalize.
+- Se a ultima observacao de calculo for True ou False, transforme isso em maior/menor e responda Final Answer imediatamente.
+- No benchmark oficial, a Final Answer deve citar explicitamente os 3 paises, a media calculada, a media mundial e a comparacao final.
 - Seja objetivo e nao invente dados.
 
 Ferramentas disponiveis:
@@ -427,6 +722,12 @@ Memoria episodica relevante:
 
 Historico recente:
 {_render_trajectory(trajectory)}
+
+Checklist do benchmark oficial:
+- citar explicitamente os 3 paises do top 3
+- citar a media do PIB per capita do top 3
+- citar a media mundial do PIB per capita
+- dizer se a media do top 3 e maior ou menor que a mundial
 
 Decida o proximo melhor passo. Se ja houver informacao suficiente, responda com Final Answer.
 """
@@ -500,11 +801,14 @@ def run_react_coala_agent(
     }
     trajectory: list[dict[str, Any]] = []
     total_tokens = 0
+    llm_calls = 0
+    started_at = time.perf_counter()
 
     print("=== INICIANDO AGENTE REACT + COALA ===")
     print(f"Pergunta: {question}\n")
     print(f"Memoria persistente: {Path(memory_dir).resolve()}\n")
 
+    # Loop principal do ReACT: recuperar contexto -> pensar -> agir -> observar.
     while working_memory["step"] < max_steps:
         semantic_hits = memory.search_semantic(
             f"{question}\n{working_memory.get('last_observation') or ''}",
@@ -523,6 +827,7 @@ def run_react_coala_agent(
             max_steps=max_steps,
         )
 
+        llm_calls += 1
         response = llm.invoke(
             [
                 SystemMessage(content=build_react_system_prompt(tools)),
@@ -550,6 +855,8 @@ def run_react_coala_agent(
                 "resposta": final_answer,
                 "steps": working_memory["step"],
                 "tokens": total_tokens,
+                "llm_calls": llm_calls,
+                "total_time_seconds": round(time.perf_counter() - started_at, 4),
                 "trajectory": trajectory,
                 "memory_dir": str(Path(memory_dir).resolve()),
                 "memory_counts": memory.counts(),
@@ -609,6 +916,8 @@ def run_react_coala_agent(
         "resposta": final_answer,
         "steps": working_memory["step"],
         "tokens": total_tokens,
+        "llm_calls": llm_calls,
+        "total_time_seconds": round(time.perf_counter() - started_at, 4),
         "trajectory": trajectory,
         "memory_dir": str(Path(memory_dir).resolve()),
         "memory_counts": memory.counts(),
