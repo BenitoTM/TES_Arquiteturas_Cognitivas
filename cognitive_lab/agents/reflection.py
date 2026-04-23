@@ -11,6 +11,7 @@ from uuid import uuid4
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from cognitive_lab.agents import react_coala
+from cognitive_lab.runtime.pricing import add_token_usage, zero_token_usage
 
 
 DEFAULT_REFLECTION_MEMORY_DIR = "data/reflection_memory"
@@ -266,6 +267,7 @@ def run_reflection_attempt(
     trajectory: list[dict[str, Any]] = []
     total_tokens = 0
     llm_calls = 0
+    token_usage = zero_token_usage()
 
     # Loop principal do Reflection: agir com base nas reflexoes anteriores.
     for _ in range(max_steps):
@@ -293,6 +295,7 @@ def run_reflection_attempt(
         )
         if getattr(response, "usage_metadata", None):
             total_tokens += response.usage_metadata.get("total_tokens", 0)
+            token_usage = add_token_usage(token_usage, response.usage_metadata)
 
         text = response.content if isinstance(response.content, str) else str(response.content)
         parsed = react_coala._parse_react_output(text)
@@ -307,6 +310,7 @@ def run_reflection_attempt(
                 "final_answer": parsed["final_answer"],
                 "steps": working_memory["step"],
                 "tokens": total_tokens,
+                "token_usage": token_usage,
                 "llm_calls": llm_calls,
                 "trajectory": trajectory,
                 "working_memory": working_memory,
@@ -367,6 +371,7 @@ def run_reflection_attempt(
         "final_answer": None,
         "steps": working_memory["step"],
         "tokens": total_tokens,
+        "token_usage": token_usage,
         "llm_calls": llm_calls,
         "trajectory": trajectory,
         "working_memory": working_memory,
@@ -385,6 +390,7 @@ def judge_attempt(question: str, attempt_result: dict[str, Any], llm: Any) -> di
             "verdict": "RETRY",
             "feedback": feedback,
             "tokens": 0,
+            "token_usage": zero_token_usage(),
             "llm_calls": 0,
         }
 
@@ -397,6 +403,7 @@ def judge_attempt(question: str, attempt_result: dict[str, Any], llm: Any) -> di
             "verdict": verdict,
             "feedback": evaluation["feedback"],
             "tokens": 0,
+            "token_usage": zero_token_usage(),
             "llm_calls": 0,
         }
 
@@ -413,14 +420,16 @@ def judge_attempt(question: str, attempt_result: dict[str, Any], llm: Any) -> di
         ]
     )
     tokens = 0
+    token_usage = zero_token_usage()
     if getattr(response, "usage_metadata", None):
         tokens += response.usage_metadata.get("total_tokens", 0)
+        token_usage = add_token_usage(token_usage, response.usage_metadata)
 
     text = response.content if isinstance(response.content, str) else str(response.content)
     parsed = parse_judge_output(text)
     print(f"Judge Verdict: {parsed['verdict']}")
     print(f"Judge Feedback: {parsed['feedback']}")
-    return {**parsed, "tokens": tokens, "llm_calls": 1}
+    return {**parsed, "tokens": tokens, "token_usage": token_usage, "llm_calls": 1}
 
 
 def reflect_on_attempt(question: str, attempt_result: dict[str, Any], feedback: str, llm: Any) -> dict[str, Any]:
@@ -437,13 +446,15 @@ def reflect_on_attempt(question: str, attempt_result: dict[str, Any], feedback: 
         ]
     )
     tokens = 0
+    token_usage = zero_token_usage()
     if getattr(response, "usage_metadata", None):
         tokens += response.usage_metadata.get("total_tokens", 0)
+        token_usage = add_token_usage(token_usage, response.usage_metadata)
 
     text = response.content if isinstance(response.content, str) else str(response.content)
     reflection = parse_reflection_output(text)
     print(f"Reflection: {reflection}")
-    return {"reflection": reflection, "tokens": tokens, "llm_calls": 1}
+    return {"reflection": reflection, "tokens": tokens, "token_usage": token_usage, "llm_calls": 1}
 
 
 def run_reflection_agent(
@@ -458,6 +469,7 @@ def run_reflection_agent(
     reflection_memory = ReflectionMemoryStore(root)
     total_tokens = 0
     total_llm_calls = 0
+    total_token_usage = zero_token_usage()
     last_attempt: dict[str, Any] | None = None
     last_feedback = ""
     started_at = time.perf_counter()
@@ -481,11 +493,13 @@ def run_reflection_agent(
         )
         total_tokens += attempt_result.get("tokens", 0)
         total_llm_calls += attempt_result.get("llm_calls", 0)
+        total_token_usage = add_token_usage(total_token_usage, attempt_result.get("token_usage"))
         last_attempt = attempt_result
 
         judge_result = judge_attempt(question, attempt_result, llm)
         total_tokens += judge_result.get("tokens", 0)
         total_llm_calls += judge_result.get("llm_calls", 0)
+        total_token_usage = add_token_usage(total_token_usage, judge_result.get("token_usage"))
         last_feedback = judge_result["feedback"]
 
         if judge_result["verdict"] == "ACCEPT":
@@ -498,6 +512,7 @@ def run_reflection_agent(
                 "attempts": attempt_number,
                 "steps": attempt_result["steps"],
                 "tokens": total_tokens,
+                "token_usage": total_token_usage,
                 "llm_calls": total_llm_calls,
                 "total_time_seconds": round(time.perf_counter() - started_at, 4),
                 "trajectory": attempt_result["trajectory"],
@@ -513,6 +528,7 @@ def run_reflection_agent(
             reflection_result = reflect_on_attempt(question, attempt_result, judge_result["feedback"], llm)
             total_tokens += reflection_result.get("tokens", 0)
             total_llm_calls += reflection_result.get("llm_calls", 0)
+            total_token_usage = add_token_usage(total_token_usage, reflection_result.get("token_usage"))
             reflection_memory.add_reflection(
                 question=question,
                 reflection=reflection_result["reflection"],
@@ -532,6 +548,7 @@ def run_reflection_agent(
         "attempts": max_attempts,
         "steps": last_attempt["steps"] if last_attempt else 0,
         "tokens": total_tokens,
+        "token_usage": total_token_usage,
         "llm_calls": total_llm_calls,
         "total_time_seconds": round(time.perf_counter() - started_at, 4),
         "trajectory": last_attempt["trajectory"] if last_attempt else [],

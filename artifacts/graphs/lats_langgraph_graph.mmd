@@ -1,0 +1,26 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	bootstrap(bootstrap)
+	select_frontier(select_frontier)
+	recall_memories(recall_memories)
+	expand_candidates(expand_candidates)
+	evaluate_frontier(evaluate_frontier)
+	finalize(finalize)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> bootstrap;
+	bootstrap --> select_frontier;
+	evaluate_frontier -.-> finalize;
+	evaluate_frontier -.-> select_frontier;
+	expand_candidates --> evaluate_frontier;
+	recall_memories --> expand_candidates;
+	select_frontier -.-> finalize;
+	select_frontier -.-> recall_memories;
+	finalize --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc

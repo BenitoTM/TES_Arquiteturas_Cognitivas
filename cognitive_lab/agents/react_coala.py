@@ -13,15 +13,28 @@ from uuid import uuid4
 
 import requests
 from langchain_core.messages import HumanMessage, SystemMessage
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+from cognitive_lab.runtime.pricing import add_token_usage, zero_token_usage
 
 
 DEFAULT_MEMORY_DIR = "data/coala_memory"
+REFERENCE_CACHE_DIR = Path("data/reference_cache")
+BUNDLED_WORLD_BANK_CACHE_PATH = Path("cognitive_lab/runtime/world_bank_world_gdp_per_capita_cache.json")
+RUNTIME_WORLD_BANK_CACHE_PATH = REFERENCE_CACHE_DIR / "world_gdp_per_capita.json"
 WORLD_BANK_WORLD_GDP_PER_CAPITA_URL = (
     "https://api.worldbank.org/v2/country/WLD/indicator/NY.GDP.PCAP.CD?format=json&per_page=10"
 )
 OFFICIAL_BENCHMARK_QUESTION = (
     "Pesquise os 3 países com maior PIB da América do Sul, calcule a média do "
     "PIB per capita deles e responda: essa média é maior ou menor que a média mundial?"
+)
+FILTERED_TOP3_BENCHMARK_QUESTION = (
+    "Pesquise os 3 países com maior PIB da América do Sul. Entre eles, considere apenas os países "
+    "cujo PIB per capita é maior que a média mundial. Calcule a média do PIB per capita desse "
+    "subconjunto e diga quantos países entraram nele. Depois responda se essa nova média é maior "
+    "ou menor que a média mundial."
 )
 
 
@@ -402,19 +415,82 @@ def _format_country_block(record: dict[str, Any]) -> str:
     )
 
 
+def _build_retry_session() -> requests.Session:
+    retry = Retry(
+        total=3,
+        read=3,
+        connect=3,
+        backoff_factor=1.0,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+    )
+    session = requests.Session()
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+def _read_world_bank_cache(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    year = payload.get("year")
+    value = _parse_float(payload.get("value"))
+    source = payload.get("source")
+    if year is None or value is None or not source:
+        return None
+
+    return {
+        "year": int(year),
+        "value": value,
+        "source": str(source),
+    }
+
+
+def _write_world_bank_cache(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 def _fetch_world_bank_world_gdp_per_capita() -> dict[str, Any]:
-    response = requests.get(WORLD_BANK_WORLD_GDP_PER_CAPITA_URL, timeout=10)
-    response.raise_for_status()
-    payload = response.json()
-    entries = payload[1] if len(payload) > 1 else []
-    for entry in entries:
-        value = _parse_float(entry.get("value"))
-        if value is not None:
+    session = _build_retry_session()
+    try:
+        response = session.get(WORLD_BANK_WORLD_GDP_PER_CAPITA_URL, timeout=(10, 30))
+        response.raise_for_status()
+        payload = response.json()
+        entries = payload[1] if len(payload) > 1 else []
+        for entry in entries:
+            value = _parse_float(entry.get("value"))
+            if value is not None:
+                result = {
+                    "year": int(entry["date"]),
+                    "value": value,
+                    "source": "World Bank NY.GDP.PCAP.CD",
+                }
+                _write_world_bank_cache(RUNTIME_WORLD_BANK_CACHE_PATH, result)
+                return result
+    except requests.RequestException:
+        cached = _read_world_bank_cache(RUNTIME_WORLD_BANK_CACHE_PATH)
+        if cached:
             return {
-                "year": int(entry["date"]),
-                "value": value,
-                "source": "World Bank NY.GDP.PCAP.CD",
+                **cached,
+                "source": f"{cached['source']} (cache local)",
             }
+        bundled = _read_world_bank_cache(BUNDLED_WORLD_BANK_CACHE_PATH)
+        if bundled:
+            return {
+                **bundled,
+                "source": f"{bundled['source']} (cache empacotado)",
+            }
+        raise
+    finally:
+        session.close()
+
     raise ValueError("Nao foi possivel localizar um valor mundial valido no World Bank.")
 
 
@@ -435,6 +511,36 @@ def get_official_benchmark_reference() -> dict[str, Any]:
         "top3_average": top3_average,
         "world_average": world["value"],
         "world_year": world["year"],
+        "comparison": comparison,
+    }
+
+
+def _is_filtered_top3_benchmark_question(question: str) -> bool:
+    normalized = _normalize_text(question)
+    return (
+        "3 paises com maior pib da america do sul" in normalized
+        and "pib per capita e maior que a media mundial" in normalized
+        and "quantos paises entraram nele" in normalized
+    )
+
+
+def get_filtered_top3_benchmark_reference() -> dict[str, Any]:
+    base_reference = get_official_benchmark_reference()
+    eligible = [
+        record
+        for record in base_reference["top3"]
+        if record["pib_per_capita"] is not None and record["pib_per_capita"] > base_reference["world_average"]
+    ]
+    subset_average = sum(record["pib_per_capita"] for record in eligible) / len(eligible)
+    comparison = "maior" if subset_average > base_reference["world_average"] else "menor"
+    return {
+        "question": FILTERED_TOP3_BENCHMARK_QUESTION,
+        "top3": base_reference["top3"],
+        "eligible_subset": eligible,
+        "eligible_count": len(eligible),
+        "subset_average": subset_average,
+        "world_average": base_reference["world_average"],
+        "world_year": base_reference["world_year"],
         "comparison": comparison,
     }
 
@@ -484,6 +590,72 @@ def evaluate_official_benchmark_answer(
         "feedback": "A resposta contem os tres paises corretos, a media do top 3, a media mundial e a comparacao correta.",
         "reference": reference,
     }
+
+
+def evaluate_filtered_top3_benchmark_answer(
+    response: str,
+    reference: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    reference = reference or get_filtered_top3_benchmark_reference()
+    normalized = _normalize_text(response)
+    expected_countries = [_normalize_text(item["country_name"]) for item in reference["top3"]]
+    missing_countries = [country for country in expected_countries if country not in normalized]
+    expected_comparison = reference["comparison"]
+    has_expected_comparison = expected_comparison in normalized
+
+    numbers = _extract_numbers(response)
+    has_subset_average = any(abs(number - reference["subset_average"]) <= 5 for number in numbers)
+    has_world = any(abs(number - reference["world_average"]) <= 5 for number in numbers)
+    has_subset_count = any(abs(number - reference["eligible_count"]) < 0.1 for number in numbers)
+
+    missing_items = []
+    if missing_countries:
+        missing_items.append(f"faltaram paises do top 3: {', '.join(missing_countries)}")
+    if not has_subset_count:
+        missing_items.append("faltou dizer quantos paises entraram no subconjunto")
+    if not has_subset_average:
+        missing_items.append("faltou a media calculada do subconjunto")
+    if not has_world:
+        missing_items.append("faltou a media mundial")
+    if not has_expected_comparison:
+        missing_items.append(f"faltou indicar que a media do subconjunto e {expected_comparison} que a mundial")
+
+    if missing_items:
+        return {
+            "correct": False,
+            "feedback": " ; ".join(missing_items),
+            "reference": reference,
+        }
+    return {
+        "correct": True,
+        "feedback": (
+            "A resposta contem os paises corretos do top 3, a quantidade do subconjunto, "
+            "a media do subconjunto, a media mundial e a comparacao correta."
+        ),
+        "reference": reference,
+    }
+
+
+def get_benchmark_reference(question: str) -> dict[str, Any] | None:
+    normalized = _normalize_text(question)
+    if normalized == _normalize_text(OFFICIAL_BENCHMARK_QUESTION):
+        return get_official_benchmark_reference()
+    if _is_filtered_top3_benchmark_question(question):
+        return get_filtered_top3_benchmark_reference()
+    return None
+
+
+def evaluate_benchmark_answer(
+    question: str,
+    response: str,
+    reference: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    normalized = _normalize_text(question)
+    if normalized == _normalize_text(OFFICIAL_BENCHMARK_QUESTION):
+        return evaluate_official_benchmark_answer(response, reference=reference)
+    if _is_filtered_top3_benchmark_question(question):
+        return evaluate_filtered_top3_benchmark_answer(response, reference=reference)
+    return None
 
 
 def buscar_ibge(query: str, runtime: ToolRuntime) -> str:
@@ -802,6 +974,7 @@ def run_react_coala_agent(
     trajectory: list[dict[str, Any]] = []
     total_tokens = 0
     llm_calls = 0
+    token_usage = zero_token_usage()
     started_at = time.perf_counter()
 
     print("=== INICIANDO AGENTE REACT + COALA ===")
@@ -838,6 +1011,7 @@ def run_react_coala_agent(
 
         if getattr(response, "usage_metadata", None):
             total_tokens += response.usage_metadata.get("total_tokens", 0)
+            token_usage = add_token_usage(token_usage, response.usage_metadata)
 
         text = response.content if isinstance(response.content, str) else str(response.content)
         parsed = _parse_react_output(text)
@@ -855,6 +1029,7 @@ def run_react_coala_agent(
                 "resposta": final_answer,
                 "steps": working_memory["step"],
                 "tokens": total_tokens,
+                "token_usage": token_usage,
                 "llm_calls": llm_calls,
                 "total_time_seconds": round(time.perf_counter() - started_at, 4),
                 "trajectory": trajectory,
@@ -916,6 +1091,7 @@ def run_react_coala_agent(
         "resposta": final_answer,
         "steps": working_memory["step"],
         "tokens": total_tokens,
+        "token_usage": token_usage,
         "llm_calls": llm_calls,
         "total_time_seconds": round(time.perf_counter() - started_at, 4),
         "trajectory": trajectory,

@@ -9,6 +9,8 @@ Repositório de experimentos com arquiteturas cognitivas para agentes baseados e
 - o mesmo ReACT representado como um grafo LangGraph explícito
 - um agente Reflection/Reflexion com múltiplas tentativas, julgamento e reflexão
 - o mesmo Reflection representado como um grafo LangGraph explícito
+- um agente LATS com busca em árvore, memória CoALA e seleção de ramos
+- o mesmo LATS representado como um grafo LangGraph explícito
 
 ## Estrutura do repositório
 
@@ -18,11 +20,13 @@ Repositório de experimentos com arquiteturas cognitivas para agentes baseados e
 │   └── graphs/                  # Mermaid e PNG gerados pelos scripts LangGraph
 ├── cognitive_lab/
 │   ├── agents/
+│   │   ├── lats.py              # lógica do LATS + CoALA
 │   │   ├── react_coala.py       # lógica do ReACT + CoALA
 │   │   └── reflection.py        # lógica do Reflection/Reflexion
 │   ├── runtime/
 │   │   └── portkey.py           # integração com Portkey, modelo e chatbot base
 │   ├── langgraph_portkey.py     # wrapper de compatibilidade
+│   ├── lats_agent.py            # wrapper de compatibilidade
 │   ├── react_coala.py           # wrapper de compatibilidade
 │   └── reflection_agent.py      # wrapper de compatibilidade
 ├── data/
@@ -33,8 +37,11 @@ Repositório de experimentos com arquiteturas cognitivas para agentes baseados e
 │   ├── roteiro_apresentacao.md  # roteiro para a apresentação
 │   └── free_llm_examples.md     # referências auxiliares
 ├── compare_agents.py            # benchmark comparativo automático
+├── compare_agents_suite.py      # suíte com benchmark simples + benchmark filtrado
 ├── exemple.env                  # exemplo de configuração
 ├── llm_call.py                  # chatbot mínimo
+├── lats_call.py                 # LATS + CoALA
+├── lats_langgraph_call.py       # LATS + CoALA em LangGraph
 ├── react_call.py                # ReACT + CoALA
 ├── react_langgraph_call.py      # ReACT + CoALA em LangGraph
 ├── reflection_call.py           # Reflection/Reflexion
@@ -202,7 +209,55 @@ Saídas:
 - Mermaid em `artifacts/graphs/reflection_langgraph_graph.mmd`
 - PNG opcional com `REFLECTION_LANGGRAPH_PNG=artifacts/graphs/reflection_langgraph_graph.png`
 
-### 6. Benchmark comparativo
+### 6. LATS + CoALA
+
+```bash
+.venv/bin/python lats_call.py
+```
+
+Variáveis úteis:
+
+```bash
+LATS_USER_MESSAGE="Sua pergunta aqui"
+LATS_MAX_ITERATIONS=4
+LATS_BRANCHING_FACTOR=2
+LATS_MAX_DEPTH=4
+LATS_MEMORY_DIR=data/lats_memory
+```
+
+O agente executa:
+
+- seleção de um ramo promissor da árvore
+- expansão com múltiplos candidatos por iteração
+- avaliação heurística e retropropagação do score
+- consolidação da melhor trajetória final com memória CoALA
+
+Persistência:
+
+- memória semântica em `data/lats_memory/semantic_memory.json`
+- memória episódica em `data/lats_memory/episodic_memory.json`
+
+### 7. LATS em LangGraph
+
+```bash
+.venv/bin/python lats_langgraph_call.py
+```
+
+Nós do grafo:
+
+- `bootstrap`
+- `select_frontier`
+- `recall_memories`
+- `expand_candidates`
+- `evaluate_frontier`
+- `finalize`
+
+Saídas:
+
+- Mermaid em `artifacts/graphs/lats_langgraph_graph.mmd`
+- PNG opcional com `LATS_LANGGRAPH_PNG=artifacts/graphs/lats_langgraph_graph.png`
+
+### 8. Benchmark comparativo
 
 ```bash
 .venv/bin/python compare_agents.py
@@ -210,13 +265,33 @@ Saídas:
 
 Esse script:
 
-- roda `ReAct + CoALA` e `Reflection / Reflexion` com a mesma pergunta oficial
-- mede `resposta correta?`, `llm_calls`, `total_time_seconds`, `tokens` e `steps`
+- roda `ReAct + CoALA`, `Reflection / Reflexion` e `LATS + CoALA` com a mesma pergunta oficial
+- mede `resposta correta?`, `llm_calls`, `total_time_seconds`, `input_tokens`, `output_tokens`, `tokens`, `estimated_cost_usd` e `steps`
 - salva artefatos em:
   - `artifacts/benchmark/comparison.md`
   - `artifacts/benchmark/comparison.json`
 
 Esse é o comando principal para reproduzir a comparação final do trabalho.
+
+### 9. Suíte com dois benchmarks
+
+```bash
+.venv/bin/python compare_agents_suite.py
+```
+
+Esse script roda automaticamente:
+
+- o benchmark simples original
+- o benchmark com filtro sobre o subconjunto dos 3 maiores PIBs
+
+Artefatos gerados:
+
+- `artifacts/benchmark/simple_top3/comparison.md`
+- `artifacts/benchmark/simple_top3/comparison.json`
+- `artifacts/benchmark/filtered_top3_subset/comparison.md`
+- `artifacts/benchmark/filtered_top3_subset/comparison.json`
+- `artifacts/benchmark/suite_summary.md`
+- `artifacts/benchmark/suite_summary.json`
 
 ## Como salvar os grafos em PNG
 
@@ -224,6 +299,7 @@ Exemplos:
 
 ```bash
 CHATBOT_LANGGRAPH_PNG=artifacts/graphs/chatbot_graph.png .venv/bin/python llm_call.py
+LATS_LANGGRAPH_PNG=artifacts/graphs/lats_langgraph_graph.png .venv/bin/python lats_langgraph_call.py
 REACT_LANGGRAPH_PNG=artifacts/graphs/react_langgraph_graph.png .venv/bin/python react_langgraph_call.py
 REFLECTION_LANGGRAPH_PNG=artifacts/graphs/reflection_langgraph_graph.png .venv/bin/python reflection_langgraph_call.py
 ```
@@ -246,7 +322,7 @@ Principais pacotes do projeto:
 
 ## Observações
 
-- `cognitive_lab/langgraph_portkey.py`, `cognitive_lab/react_coala.py` e `cognitive_lab/reflection_agent.py` continuam existindo como wrappers de compatibilidade.
+- `cognitive_lab/langgraph_portkey.py`, `cognitive_lab/lats_agent.py`, `cognitive_lab/react_coala.py` e `cognitive_lab/reflection_agent.py` continuam existindo como wrappers de compatibilidade.
 - `data/` e `artifacts/graphs/` estão no `.gitignore`, porque são saídas geradas em execução.
 - `artifacts/benchmark/` também é gerado durante os benchmarks comparativos.
 - `docs/free_llm_examples.md` foi mantido como material de referência complementar.

@@ -15,9 +15,9 @@ Pergunta usada: Pesquise os 3 países com maior PIB da América do Sul. Entre el
 
 | Arquitetura | Resposta correta? | Chamadas ao LLM | Tempo total (s) | Input tokens | Output tokens | Tokens | Custo estimado (USD) | Steps | Memoria CoALA | Complexidade de codigo | Quando usar? |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|
-| ReAct + CoALA | Nao | 9 | 29.0348 | 13158 | 832 | 13990 | 0.0060274 | 9 | working + semantic + episodic + procedural | media | quando a tarefa depende de ferramentas externas e ciclo Thought -> Action -> Observation |
-| Reflection / Reflexion | Nao | 21 | 54.5802 | 27664 | 1992 | 29656 | 0.0132792 | 6 | working + semantic + episodic + procedural + reflection memory | alta | quando vale pagar mais chamadas ao LLM para revisar e corrigir tentativas |
-| LATS + CoALA | Nao | 9 | 21.0360 | 11341 | 588 | 11929 | 0.0048723 | 3 | working + semantic + episodic + procedural + arvore de busca | alta | quando compensa explorar multiplos ramos e selecionar a trajetoria mais promissora |
+| ReAct + CoALA | Nao | 9 | 18.7850 | 12927 | 834 | 13761 | 0.0059631 | 9 | working + semantic + episodic + procedural | media | quando a tarefa depende de ferramentas externas e ciclo Thought -> Action -> Observation |
+| Reflection / Reflexion | Nao | 36 | 116.5209 | 53994 | 3683 | 57677 | 0.0254057 | 8 | working + semantic + episodic + procedural + reflection memory | alta | quando vale pagar mais chamadas ao LLM para revisar e corrigir tentativas |
+| LATS + CoALA | Nao | 11 | 43.2198 | 14159 | 1014 | 15173 | 0.0067827 | 3 | working + semantic + episodic + procedural + arvore de busca | alta | quando compensa explorar multiplos ramos e selecionar a trajetoria mais promissora |
 
 ## Custo estimado
 
@@ -27,6 +27,6 @@ Pergunta usada: Pesquise os 3 países com maior PIB da América do Sul. Entre el
 
 ## Notas de avaliacao
 
-- ReAct + CoALA: faltou dizer quantos paises entraram no subconjunto
+- ReAct + CoALA: faltou dizer quantos paises entraram no subconjunto ; faltou a media calculada do subconjunto
 - Reflection / Reflexion: faltaram paises do top 3: brasil, argentina, venezuela ; faltou dizer quantos paises entraram no subconjunto ; faltou a media calculada do subconjunto ; faltou a media mundial ; faltou indicar que a media do subconjunto e maior que a mundial
 - LATS + CoALA: faltaram paises do top 3: brasil, argentina, venezuela ; faltou dizer quantos paises entraram no subconjunto ; faltou a media calculada do subconjunto ; faltou a media mundial ; faltou indicar que a media do subconjunto e maior que a mundial
